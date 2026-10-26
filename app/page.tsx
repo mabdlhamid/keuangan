@@ -2,6 +2,7 @@
 
 import type { Session } from "@supabase/supabase-js";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AccountForm, AccountRow, TransferForm, TransferRow, UnassignedRow } from "@/components/Accounts";
 import AuthScreen from "@/components/AuthScreen";
 import BudgetPanel from "@/components/BudgetPanel";
 import { DonutChart, TrendChart, type BarPoint, type Slice } from "@/components/Charts";
@@ -23,6 +24,7 @@ import { MoveForm, PocketForm, PocketMini, PocketRow } from "@/components/Pocket
 import Sheet from "@/components/Sheet";
 import TransactionForm from "@/components/TransactionForm";
 import TransactionList from "@/components/TransactionList";
+import { computeBalances } from "@/lib/accounts";
 import { colorFor } from "@/lib/categories";
 import { exportBackup, exportCSV, parseBackup } from "@/lib/exporters";
 import {
@@ -34,16 +36,27 @@ import {
   shiftMonth,
 } from "@/lib/format";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabase";
-import type { Budgets, Pocket, Transaction, TxType } from "@/lib/types";
+import type {
+  Account,
+  AccountKind,
+  Budgets,
+  Pocket,
+  Transaction,
+  Transfer,
+  TxType,
+} from "@/lib/types";
 import { useCloudState } from "@/lib/useCloudState";
 import { useLocalStorage } from "@/lib/useLocalStorage";
 
-type Tab = "home" | "tx" | "pockets" | "stats";
+type Tab = "home" | "tx" | "wallet" | "stats";
+type WalletView = "accounts" | "pockets";
 
 type SheetState =
   | { kind: "tx"; editing: Transaction | null; type: TxType }
   | { kind: "pocket"; editing: Pocket | null }
   | { kind: "move"; pocketId: string; mode: "in" | "out" }
+  | { kind: "account"; editing: Account | null }
+  | { kind: "transfer" }
   | { kind: "settings" }
   | null;
 
@@ -95,18 +108,23 @@ function App({ userId, email, onLogout }: AppProps) {
   const [transactions, setTransactions, txReady, txErr] = useCloudState<Transaction[]>(userId, "transactions", []);
   const [budgets, setBudgets, bReady, bErr] = useCloudState<Budgets>(userId, "budgets", {});
   const [pockets, setPockets, pReady, pErr] = useCloudState<Pocket[]>(userId, "pockets", []);
+  const [accounts, setAccounts, aReady, aErr] = useCloudState<Account[]>(userId, "accounts", []);
+  const [transfers, setTransfers, trReady, trErr] = useCloudState<Transfer[]>(userId, "transfers", []);
   const [hide, setHide] = useLocalStorage<boolean>("kp:hide", false); // preferensi tampilan, per perangkat
+  const [lastAccount, setLastAccount] = useLocalStorage<string>("kp:lastAccount", "");
 
   const [tab, setTab] = useState<Tab>("home");
+  const [walletView, setWalletView] = useState<WalletView>("accounts");
   const [sheet, setSheet] = useState<SheetState>(null);
   const [month, setMonth] = useState(currentMonth());
   const [typeFilter, setTypeFilter] = useState<"all" | TxType>("all");
+  const [accountFilter, setAccountFilter] = useState<string>("all"); // "all" | "none" | id rekening
   const [query, setQuery] = useState("");
   const [saveError, setSaveError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const ready = txReady && bReady && pReady;
-  const loadError = txErr || bErr || pErr;
+  const ready = txReady && bReady && pReady && aReady && trReady;
+  const loadError = txErr || bErr || pErr || aErr || trErr;
 
   useEffect(() => {
     const onErr = (e: Event) => setSaveError((e as CustomEvent<string>).detail || "Gagal menyimpan.");
@@ -120,6 +138,14 @@ function App({ userId, email, onLogout }: AppProps) {
   }, []);
 
   /* ---------- Hitungan ---------- */
+
+  const accountMap = useMemo(() => new Map(accounts.map((a) => [a.id, a])), [accounts]);
+  const accountLabel = (id?: string) => (id ? accountMap.get(id)?.name : undefined);
+
+  const bal = useMemo(
+    () => computeBalances(accounts, transactions, transfers),
+    [accounts, transactions, transfers]
+  );
 
   const monthTx = useMemo(
     () => transactions.filter((t) => t.date.startsWith(month)),
@@ -138,11 +164,8 @@ function App({ userId, email, onLogout }: AppProps) {
 
   const pocketsTotal = useMemo(() => pockets.reduce((s, p) => s + p.balance, 0), [pockets]);
 
-  // Saldo utama = semua pemasukan − semua pengeluaran − uang yang sudah disimpan di kantong
-  const mainBalance = useMemo(() => {
-    const cash = transactions.reduce((s, t) => s + (t.type === "income" ? t.amount : -t.amount), 0);
-    return cash - pocketsTotal;
-  }, [transactions, pocketsTotal]);
+  // Saldo utama = total uang di semua rekening − uang yang sudah disisihkan di kantong
+  const mainBalance = bal.total - pocketsTotal;
 
   const spentByCategory = useMemo(() => {
     const map: Record<string, number> = {};
@@ -179,21 +202,36 @@ function App({ userId, email, onLogout }: AppProps) {
     [transactions]
   );
 
+  const sortedTransfers = useMemo(
+    () => [...transfers].sort((a, b) => b.date.localeCompare(a.date)),
+    [transfers]
+  );
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return monthTx
       .filter((t) => typeFilter === "all" || t.type === typeFilter)
+      .filter((t) => {
+        if (accountFilter === "all") return true;
+        if (accountFilter === "none") return !(t.accountId && accountMap.has(t.accountId));
+        return t.accountId === accountFilter;
+      })
       .filter((t) => !q || t.note.toLowerCase().includes(q) || t.category.toLowerCase().includes(q))
       .sort((a, b) => b.date.localeCompare(a.date));
-  }, [monthTx, typeFilter, query]);
+  }, [monthTx, typeFilter, accountFilter, accountMap, query]);
 
   /* ---------- Aksi ---------- */
 
   const closeSheet = () => setSheet(null);
 
   function saveTx(data: Omit<Transaction, "id">, id?: string) {
-    if (id) setTransactions((prev) => prev.map((t) => (t.id === id ? { ...data, id } : t)));
-    else setTransactions((prev) => [{ ...data, id: newId() }, ...prev]);
+    if (id) {
+      // ganti seluruh transaksi, termasuk menghapus accountId bila tidak dipilih
+      setTransactions((prev) => prev.map((t) => (t.id === id ? { ...data, id } : t)));
+    } else {
+      setTransactions((prev) => [{ ...data, id: newId() }, ...prev]);
+    }
+    if (data.accountId) setLastAccount(data.accountId);
     setMonth(data.date.slice(0, 7));
     closeSheet();
   }
@@ -228,6 +266,71 @@ function App({ userId, email, onLogout }: AppProps) {
     else openMove(pockets[0].id, "in");
   }
 
+  function saveAccount(
+    data: { name: string; kind: AccountKind; color: string; balance: number },
+    id?: string
+  ) {
+    if (id) {
+      const acc = accounts.find((a) => a.id === id);
+      if (!acc) return;
+      // Angka yang diisi = saldo saat ini. Selisihnya dimasukkan ke saldo awal.
+      const current = bal.byId[id] ?? acc.openingBalance;
+      const opening = acc.openingBalance + (data.balance - current);
+      setAccounts((prev) =>
+        prev.map((a) =>
+          a.id === id
+            ? { ...a, name: data.name, kind: data.kind, color: data.color, openingBalance: opening }
+            : a
+        )
+      );
+    } else {
+      const created: Account = {
+        id: newId(),
+        name: data.name,
+        kind: data.kind,
+        color: data.color,
+        openingBalance: data.balance,
+      };
+      setAccounts((prev) => [...prev, created]);
+      if (!lastAccount) setLastAccount(created.id);
+    }
+    closeSheet();
+  }
+
+  function deleteAccount(id: string) {
+    if (transfers.some((t) => t.from === id || t.to === id)) {
+      alert(
+        "Rekening ini punya riwayat pindah saldo. Hapus dulu riwayat pindah saldonya di tab Dompet, lalu coba lagi."
+      );
+      return;
+    }
+    const used = transactions.filter((t) => t.accountId === id).length;
+    const msg =
+      used > 0
+        ? `Hapus rekening ini? ${used} transaksinya tidak ikut terhapus, hanya menjadi “Belum ada rekening”. Saldo rekening ini ikut hilang dari total.`
+        : "Hapus rekening ini?";
+    if (!confirm(msg)) return;
+    setAccounts((prev) => prev.filter((a) => a.id !== id));
+    setTransactions((prev) =>
+      prev.map((t) => {
+        if (t.accountId !== id) return t;
+        const { accountId: _removed, ...rest } = t;
+        return rest;
+      })
+    );
+    closeSheet();
+  }
+
+  function saveTransfer(data: Omit<Transfer, "id">) {
+    setTransfers((prev) => [{ ...data, id: newId() }, ...prev]);
+    closeSheet();
+  }
+
+  function deleteTransfer(id: string) {
+    if (!confirm("Hapus pindah saldo ini? Saldo kedua rekening kembali seperti sebelum dipindah.")) return;
+    setTransfers((prev) => prev.filter((t) => t.id !== id));
+  }
+
   function setBudget(category: string, amount: number) {
     setBudgets((prev) => {
       const next = { ...prev };
@@ -235,6 +338,11 @@ function App({ userId, email, onLogout }: AppProps) {
       else delete next[category];
       return next;
     });
+  }
+
+  function openWallet(view: WalletView) {
+    setWalletView(view);
+    setTab("wallet");
   }
 
   async function importBackup(e: React.ChangeEvent<HTMLInputElement>) {
@@ -246,18 +354,27 @@ function App({ userId, email, onLogout }: AppProps) {
       alert("File backup tidak bisa dibaca. Pastikan file berasal dari menu Backup.");
       return;
     }
-    if (!confirm(`Pulihkan ${parsed.transactions.length} transaksi dan ${parsed.pockets.length} kantong? Data saat ini akan diganti.`)) return;
+    if (
+      !confirm(
+        `Pulihkan ${parsed.transactions.length} transaksi, ${parsed.accounts.length} rekening, dan ${parsed.pockets.length} kantong? Data saat ini akan diganti.`
+      )
+    )
+      return;
     setTransactions(parsed.transactions);
     setBudgets(parsed.budgets);
     setPockets(parsed.pockets);
+    setAccounts(parsed.accounts);
+    setTransfers(parsed.transfers);
     closeSheet();
   }
 
   function resetAll() {
-    if (!confirm("Hapus SEMUA data (transaksi, kantong, anggaran)? Ini tidak bisa dibatalkan.")) return;
+    if (!confirm("Hapus SEMUA data (transaksi, rekening, kantong, anggaran)? Ini tidak bisa dibatalkan.")) return;
     setTransactions([]);
     setBudgets({});
     setPockets([]);
+    setAccounts([]);
+    setTransfers([]);
     closeSheet();
   }
 
@@ -287,6 +404,7 @@ function App({ userId, email, onLogout }: AppProps) {
   if (!ready) return <div className="loading">Memuat…</div>;
 
   const money = (n: number) => (hide ? MASK : formatIDR(n));
+  const showUnassigned = accounts.length > 0 && bal.unassignedCount > 0;
 
   const MonthNav = (
     <div className="month-nav">
@@ -358,9 +476,44 @@ function App({ userId, email, onLogout }: AppProps) {
 
           <section>
             <div className="section-head">
+              <h2>Rekening</h2>
+              {accounts.length > 0 && (
+                <button className="link-btn" onClick={() => openWallet("accounts")}>
+                  Lihat semua <IconChevron />
+                </button>
+              )}
+            </div>
+            {accounts.length === 0 ? (
+              <div className="empty card-flat">
+                <div className="empty-emoji" aria-hidden>🏦</div>
+                <p>Tambahkan BSI, SeaBank, DANA, atau rekening lain agar saldonya tercatat otomatis.</p>
+                <button className="btn-soft" onClick={() => setSheet({ kind: "account", editing: null })}>
+                  Tambah rekening
+                </button>
+              </div>
+            ) : (
+              <ul className="tx-list card-flat">
+                {accounts.slice(0, 4).map((a) => (
+                  <AccountRow
+                    key={a.id}
+                    account={a}
+                    balance={bal.byId[a.id] ?? 0}
+                    hide={hide}
+                    onClick={() => setSheet({ kind: "account", editing: a })}
+                  />
+                ))}
+                {showUnassigned && (
+                  <UnassignedRow count={bal.unassignedCount} />
+                )}
+              </ul>
+            )}
+          </section>
+
+          <section>
+            <div className="section-head">
               <h2>Kantong</h2>
               {pockets.length > 0 && (
-                <button className="link-btn" onClick={() => setTab("pockets")}>
+                <button className="link-btn" onClick={() => openWallet("pockets")}>
                   Lihat semua <IconChevron />
                 </button>
               )}
@@ -391,6 +544,7 @@ function App({ userId, email, onLogout }: AppProps) {
           <TransactionList
             items={sorted.slice(0, 6)}
             hide={hide}
+            accountLabel={accountLabel}
             onSelect={(t) => setSheet({ kind: "tx", editing: t, type: t.type })}
             emptyText="Belum ada catatan. Mulai dengan menambah uang masuk atau keluar."
           />
@@ -440,11 +594,28 @@ function App({ userId, email, onLogout }: AppProps) {
               {label}
             </button>
           ))}
+          {accounts.length > 0 && (
+            <select
+              className="filter-select"
+              value={accountFilter}
+              onChange={(e) => setAccountFilter(e.target.value)}
+              aria-label="Filter rekening"
+            >
+              <option value="all">Semua rekening</option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+              <option value="none">Belum ada rekening</option>
+            </select>
+          )}
         </div>
         <TransactionList
           grouped
           hide={hide}
           items={filtered}
+          accountLabel={accountLabel}
           onSelect={(t) => setSheet({ kind: "tx", editing: t, type: t.type })}
           emptyText={`Tidak ada transaksi di ${monthLabel(month)}.`}
         />
@@ -452,45 +623,148 @@ function App({ userId, email, onLogout }: AppProps) {
     </>
   );
 
-  const pocketsTab = (
+  const accountsView = (
     <>
-      <div className="page-head">
-        <h1>Kantong</h1>
-        <button className="pill primary" onClick={() => setSheet({ kind: "pocket", editing: null })}>
-          ＋ Kantong baru
-        </button>
+      <div className="total-card">
+        <span>Total semua rekening</span>
+        <b>{hide ? MASK : formatIDR(bal.total)}</b>
+        <small>
+          Di kantong: {money(pocketsTotal)} · Bebas dipakai: {money(mainBalance)}
+        </small>
       </div>
-      <div className="page">
-        <div className="total-card">
-          <span>Total di semua kantong</span>
-          <b>{hide ? MASK : formatIDR(pocketsTotal)}</b>
-          <small>Saldo utama: {money(mainBalance)}</small>
-        </div>
 
-        {pockets.length === 0 ? (
-          <div className="empty">
-            <div className="empty-emoji" aria-hidden>🐷</div>
-            <p>
-              Pisahkan uang untuk tujuan tertentu, misalnya dana darurat, liburan, atau gadget baru.
+      {accounts.length === 0 ? (
+        <div className="empty">
+          <div className="empty-emoji" aria-hidden>🏦</div>
+          <p>
+            Tambahkan rekening bank dan e-wallet-mu. Setiap pemasukan dan pengeluaran akan otomatis
+            menambah atau mengurangi saldonya.
+          </p>
+          <button className="btn-soft" onClick={() => setSheet({ kind: "account", editing: null })}>
+            Tambah rekening pertama
+          </button>
+        </div>
+      ) : (
+        <>
+          <button
+            className="btn-soft"
+            onClick={() => setSheet({ kind: "transfer" })}
+            disabled={accounts.length < 2}
+          >
+            ⇄ Pindah saldo antar rekening
+          </button>
+          {accounts.length < 2 && (
+            <p className="hint" style={{ marginTop: -10 }}>
+              Tambahkan minimal dua rekening untuk memindahkan saldo.
             </p>
-            <button className="btn-soft" onClick={() => setSheet({ kind: "pocket", editing: null })}>
-              Buat kantong pertama
-            </button>
-          </div>
-        ) : (
-          <div className="pocket-list">
-            {pockets.map((p) => (
-              <PocketRow
-                key={p.id}
-                pocket={p}
+          )}
+
+          <ul className="tx-list card-flat">
+            {accounts.map((a) => (
+              <AccountRow
+                key={a.id}
+                account={a}
+                balance={bal.byId[a.id] ?? 0}
                 hide={hide}
-                onDeposit={() => openMove(p.id, "in")}
-                onWithdraw={() => openMove(p.id, "out")}
-                onEdit={() => setSheet({ kind: "pocket", editing: p })}
+                onClick={() => setSheet({ kind: "account", editing: a })}
               />
             ))}
-          </div>
+            {showUnassigned && (
+              <UnassignedRow count={bal.unassignedCount} />
+            )}
+          </ul>
+
+          {sortedTransfers.length > 0 && (
+            <section>
+              <div className="section-head">
+                <h2>Riwayat pindah saldo</h2>
+              </div>
+              <ul className="tx-list card-flat">
+                {sortedTransfers.slice(0, 10).map((t) => (
+                  <TransferRow
+                    key={t.id}
+                    transfer={t}
+                    accounts={accounts}
+                    hide={hide}
+                    onClick={() => deleteTransfer(t.id)}
+                  />
+                ))}
+              </ul>
+              <p className="hint" style={{ marginTop: 8 }}>
+                Ketuk satu baris untuk menghapusnya.
+              </p>
+            </section>
+          )}
+        </>
+      )}
+    </>
+  );
+
+  const pocketsView = (
+    <>
+      <div className="total-card">
+        <span>Total di semua kantong</span>
+        <b>{hide ? MASK : formatIDR(pocketsTotal)}</b>
+        <small>Saldo utama: {money(mainBalance)}</small>
+      </div>
+
+      {pockets.length === 0 ? (
+        <div className="empty">
+          <div className="empty-emoji" aria-hidden>🐷</div>
+          <p>
+            Pisahkan uang untuk tujuan tertentu, misalnya dana darurat, liburan, atau gadget baru.
+          </p>
+          <button className="btn-soft" onClick={() => setSheet({ kind: "pocket", editing: null })}>
+            Buat kantong pertama
+          </button>
+        </div>
+      ) : (
+        <div className="pocket-list">
+          {pockets.map((p) => (
+            <PocketRow
+              key={p.id}
+              pocket={p}
+              hide={hide}
+              onDeposit={() => openMove(p.id, "in")}
+              onWithdraw={() => openMove(p.id, "out")}
+              onEdit={() => setSheet({ kind: "pocket", editing: p })}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+
+  const walletTab = (
+    <>
+      <div className="page-head">
+        <h1>Dompet</h1>
+        {walletView === "accounts" ? (
+          <button className="pill primary" onClick={() => setSheet({ kind: "account", editing: null })}>
+            ＋ Rekening baru
+          </button>
+        ) : (
+          <button className="pill primary" onClick={() => setSheet({ kind: "pocket", editing: null })}>
+            ＋ Kantong baru
+          </button>
         )}
+      </div>
+      <div className="page">
+        <div className="seg" role="group" aria-label="Pilih tampilan dompet">
+          <button
+            className={walletView === "accounts" ? "active" : ""}
+            onClick={() => setWalletView("accounts")}
+          >
+            Rekening
+          </button>
+          <button
+            className={walletView === "pockets" ? "active" : ""}
+            onClick={() => setWalletView("pockets")}
+          >
+            Kantong
+          </button>
+        </div>
+        {walletView === "accounts" ? accountsView : pocketsView}
       </div>
     </>
   );
@@ -533,6 +807,12 @@ function App({ userId, email, onLogout }: AppProps) {
         : "Kantong baru"
       : sheet?.kind === "move"
       ? "Pindahkan uang"
+      : sheet?.kind === "account"
+      ? sheet.editing
+        ? "Ubah rekening"
+        : "Rekening baru"
+      : sheet?.kind === "transfer"
+      ? "Pindah saldo"
       : "Akun dan data";
 
   return (
@@ -546,7 +826,7 @@ function App({ userId, email, onLogout }: AppProps) {
       <main className="content">
         {tab === "home" && home}
         {tab === "tx" && txTab}
-        {tab === "pockets" && pocketsTab}
+        {tab === "wallet" && walletTab}
         {tab === "stats" && statsTab}
       </main>
 
@@ -568,9 +848,9 @@ function App({ userId, email, onLogout }: AppProps) {
           <IconPlus />
           <span className="fab-label">Catat transaksi</span>
         </button>
-        <button className={`nav-item ${tab === "pockets" ? "on" : ""}`} onClick={() => setTab("pockets")}>
+        <button className={`nav-item ${tab === "wallet" ? "on" : ""}`} onClick={() => setTab("wallet")}>
           <span className="ico"><IconPocket /></span>
-          Kantong
+          Dompet
         </button>
         <button className={`nav-item ${tab === "stats" ? "on" : ""}`} onClick={() => setTab("stats")}>
           <span className="ico"><IconChart /></span>
@@ -587,6 +867,8 @@ function App({ userId, email, onLogout }: AppProps) {
           <TransactionForm
             editing={sheet.editing}
             initialType={sheet.type}
+            accounts={accounts}
+            defaultAccountId={lastAccount}
             onSubmit={saveTx}
             onDelete={deleteTx}
           />
@@ -603,6 +885,17 @@ function App({ userId, email, onLogout }: AppProps) {
             onSubmit={movePocket}
           />
         )}
+        {sheet?.kind === "account" && (
+          <AccountForm
+            editing={sheet.editing}
+            currentBalance={sheet.editing ? bal.byId[sheet.editing.id] ?? 0 : 0}
+            onSubmit={saveAccount}
+            onDelete={deleteAccount}
+          />
+        )}
+        {sheet?.kind === "transfer" && accounts.length >= 2 && (
+          <TransferForm accounts={accounts} balances={bal.byId} onSubmit={saveTransfer} />
+        )}
         {sheet?.kind === "settings" && (
           <div className="settings-list">
             <div className="account-box">
@@ -618,10 +911,13 @@ function App({ userId, email, onLogout }: AppProps) {
                 </>
               )}
             </div>
-            <button className="btn-soft" onClick={() => exportCSV(transactions)} disabled={transactions.length === 0}>
+            <button className="btn-soft" onClick={() => exportCSV(transactions, accounts)} disabled={transactions.length === 0}>
               Ekspor transaksi (CSV untuk Excel)
             </button>
-            <button className="btn-soft" onClick={() => exportBackup(transactions, budgets, pockets)}>
+            <button
+              className="btn-soft"
+              onClick={() => exportBackup({ transactions, budgets, pockets, accounts, transfers })}
+            >
               Simpan backup (JSON)
             </button>
             <button className="btn-soft" onClick={() => fileRef.current?.click()}>

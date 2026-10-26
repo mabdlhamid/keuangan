@@ -10,11 +10,24 @@ interface Props {
   grouped?: boolean;
   hide?: boolean;
   emptyText?: string;
+  /** Mengembalikan nama rekening dari id-nya (untuk ditampilkan di baris transaksi). */
+  accountLabel?: (id?: string) => string | undefined;
 }
 
-function Row({ t, onSelect, hide }: { t: Transaction; onSelect: (t: Transaction) => void; hide?: boolean }) {
+function Row({
+  t,
+  onSelect,
+  hide,
+  accountLabel,
+}: {
+  t: Transaction;
+  onSelect: (t: Transaction) => void;
+  hide?: boolean;
+  accountLabel?: (id?: string) => string | undefined;
+}) {
   const isIn = t.type === "income";
   const tint = isIn ? "#0E9F6E" : colorFor(t.category);
+  const acc = accountLabel?.(t.accountId);
   return (
     <li>
       <button className="tx" onClick={() => onSelect(t)}>
@@ -23,7 +36,10 @@ function Row({ t, onSelect, hide }: { t: Transaction; onSelect: (t: Transaction)
         </span>
         <span className="tx-main">
           <span className="tx-title">{t.note || t.category}</span>
-          <span className="tx-meta">{t.category}</span>
+          <span className="tx-meta">
+            {t.category}
+            {acc ? ` · ${acc}` : ""}
+          </span>
         </span>
         <span className={`tx-amt ${isIn ? "income" : ""}`}>
           {hide ? "Rp ••••" : `${isIn ? "+" : "−"}${formatIDR(t.amount)}`}
@@ -33,7 +49,14 @@ function Row({ t, onSelect, hide }: { t: Transaction; onSelect: (t: Transaction)
   );
 }
 
-export default function TransactionList({ items, onSelect, grouped, hide, emptyText }: Props) {
+export default function TransactionList({
+  items,
+  onSelect,
+  grouped,
+  hide,
+  emptyText,
+  accountLabel,
+}: Props) {
   if (items.length === 0) {
     return (
       <div className="empty">
@@ -47,7 +70,7 @@ export default function TransactionList({ items, onSelect, grouped, hide, emptyT
     return (
       <ul className="tx-list card-flat">
         {items.map((t) => (
-          <Row key={t.id} t={t} onSelect={onSelect} hide={hide} />
+          <Row key={t.id} t={t} onSelect={onSelect} hide={hide} accountLabel={accountLabel} />
         ))}
       </ul>
     );
@@ -72,7 +95,7 @@ export default function TransactionList({ items, onSelect, grouped, hide, emptyT
             </div>
             <ul className="tx-list card-flat">
               {g.rows.map((t) => (
-                <Row key={t.id} t={t} onSelect={onSelect} hide={hide} />
+                <Row key={t.id} t={t} onSelect={onSelect} hide={hide} accountLabel={accountLabel} />
               ))}
             </ul>
           </section>

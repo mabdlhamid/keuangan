@@ -1603,3 +1603,25 @@ input[type="password"] {
     min-height: 100dvh;
   }
 }
+/* =====================================================================
+   Tambahan v4: rekening & e-wallet
+   ===================================================================== */
+
+.filter-row {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.filter-select {
+  width: auto;
+  max-width: 100%;
+  margin-left: auto;
+  border-radius: 99px;
+  padding: 8px 14px;
+  font-weight: 700;
+  font-size: 13.5px;
+}
+
+.empty.card-flat {
+  padding: 24px 16px;
+}
