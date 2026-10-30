@@ -7,6 +7,7 @@ export interface Transaction {
   category: string;
   date: string; // YYYY-MM-DD
   note: string;
+  accountId?: string; // rekening / e-wallet tempat transaksi terjadi
 }
 
 export type Budgets = Record<string, number>;
@@ -19,4 +20,25 @@ export interface Pocket {
   color: string;
   target: number; // 0 = tanpa target
   balance: number;
+}
+
+export type AccountKind = "bank" | "ewallet" | "cash";
+
+/** Rekening bank, e-wallet, atau uang tunai. */
+export interface Account {
+  id: string;
+  name: string;
+  kind: AccountKind;
+  color: string;
+  openingBalance: number; // saldo awal saat mulai dicatat
+}
+
+/** Pindah saldo antar rekening (bukan pemasukan / pengeluaran). */
+export interface Transfer {
+  id: string;
+  from: string;
+  to: string;
+  amount: number;
+  date: string; // YYYY-MM-DD
+  note: string;
 }

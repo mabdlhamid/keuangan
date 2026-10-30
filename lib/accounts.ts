@@ -1,49 +1,44 @@
-import type { Account, Transaction, Transfer } from "./types";
+export type TxType = "income" | "expense";
 
-export interface Balances {
-  /** Saldo tiap rekening: saldo awal + pemasukan − pengeluaran ± pindah saldo. */
-  byId: Record<string, number>;
-  /** Selisih transaksi yang belum punya rekening (data lama). Hanya informasi. */
-  unassigned: number;
-  unassignedCount: number;
-  /**
-   * Total uang saat ini.
-   * - Sudah ada rekening: jumlah saldo semua rekening. Transaksi lama yang belum punya rekening
-   *   TIDAK ikut dihitung, karena saldo yang diisi saat membuat rekening sudah memuat riwayat itu.
-   * - Belum ada rekening: selisih seluruh pemasukan dan pengeluaran (seperti versi sebelumnya).
-   */
-  total: number;
+export interface Transaction {
+  id: string;
+  type: TxType;
+  amount: number;
+  category: string;
+  date: string; // YYYY-MM-DD
+  note: string;
+  accountId?: string; // rekening / e-wallet tempat transaksi terjadi
 }
 
-export function computeBalances(
-  accounts: Account[],
-  transactions: Transaction[],
-  transfers: Transfer[]
-): Balances {
-  const byId: Record<string, number> = {};
-  for (const a of accounts) byId[a.id] = a.openingBalance;
+export type Budgets = Record<string, number>;
 
-  let net = 0;
-  let unassigned = 0;
-  let unassignedCount = 0;
+/** Kantong: tempat menyimpan uang untuk tujuan tertentu. */
+export interface Pocket {
+  id: string;
+  name: string;
+  emoji: string;
+  color: string;
+  target: number; // 0 = tanpa target
+  balance: number;
+}
 
-  for (const t of transactions) {
-    const delta = t.type === "income" ? t.amount : -t.amount;
-    net += delta;
-    if (t.accountId && t.accountId in byId) {
-      byId[t.accountId] += delta;
-    } else {
-      unassigned += delta;
-      unassignedCount += 1;
-    }
-  }
+export type AccountKind = "bank" | "ewallet" | "cash";
 
-  for (const tr of transfers) {
-    if (tr.from in byId) byId[tr.from] -= tr.amount;
-    if (tr.to in byId) byId[tr.to] += tr.amount;
-  }
+/** Rekening bank, e-wallet, atau uang tunai. */
+export interface Account {
+  id: string;
+  name: string;
+  kind: AccountKind;
+  color: string;
+  openingBalance: number; // saldo awal saat mulai dicatat
+}
 
-  const total =
-    accounts.length > 0 ? Object.values(byId).reduce((s, v) => s + v, 0) : net;
-  return { byId, unassigned, unassignedCount, total };
+/** Pindah saldo antar rekening (bukan pemasukan / pengeluaran). */
+export interface Transfer {
+  id: string;
+  from: string;
+  to: string;
+  amount: number;
+  date: string; // YYYY-MM-DD
+  note: string;
 }
